@@ -5,13 +5,22 @@ File Organizer - Automatically organize files into categorized folders.
 This script scans a directory and moves files into subfolders based on their
 file extension. It's useful for cleaning up messy folders like Downloads.
 
+SAFETY POLICY:
+    This script NEVER deletes files. It only moves them.
+    - Files are moved to category subfolders (Images/, Documents/, etc.)
+    - Old files can be moved to an _Archive/ folder
+    - If a file already exists at destination, a timestamp is added to the name
+    - Use --dry-run to preview changes before applying them
+
 Usage:
     python organize.py <directory>           # Organize files in directory
     python organize.py <directory> --dry-run # Preview changes without moving files
+    python organize.py <directory> --archive # Also move files older than 30 days to _Archive/
 
 Example:
     python organize.py ~/Downloads --dry-run  # See what would happen
     python organize.py ~/Downloads            # Actually organize the files
+    python organize.py ~/Downloads --archive  # Organize and archive old files
 
 Learning Notes:
     - We use `pathlib.Path` instead of `os.path` for cleaner path handling
@@ -26,12 +35,25 @@ Learning Notes:
 # Standard library imports - these come with Python, no installation needed
 
 import sys          # System-specific functions (like exit codes)
-import shutil       # High-level file operations (copy, move, delete)
+import shutil       # High-level file operations (move only - we NEVER delete!)
 import argparse     # Command-line argument parsing
 from pathlib import Path      # Object-oriented filesystem paths (modern way)
-from datetime import datetime # Date/time handling (for duplicate file renaming)
+from datetime import datetime, timedelta  # Date/time handling
 
 # Note: We don't actually use 'os' - pathlib.Path replaces most of its functionality
+
+# =============================================================================
+# SAFETY CONFIGURATION
+# =============================================================================
+
+# IMPORTANT: This script NEVER deletes files. Only moves.
+# This is an intentional design decision for safety.
+
+# Number of days after which a file is considered "old" and eligible for archiving
+ARCHIVE_AGE_DAYS = 30
+
+# Name of the archive folder (prefixed with _ to sort it separately)
+ARCHIVE_FOLDER = "_Archive"
 
 # =============================================================================
 # CONFIGURATION
@@ -61,6 +83,50 @@ CATEGORIES = {
 # =============================================================================
 # FUNCTIONS
 # =============================================================================
+
+
+def get_file_age_days(file_path: Path) -> int:
+    """
+    Get the age of a file in days based on its modification time.
+    
+    Why modification time (mtime) instead of creation time?
+        - mtime is more reliable across different filesystems
+        - It reflects when the file was last changed, which is usually more relevant
+        - Creation time (ctime) behaves differently on Unix vs Windows
+    
+    Args:
+        file_path: Path to the file
+        
+    Returns:
+        Number of days since the file was last modified
+        
+    Example:
+        >>> get_file_age_days(Path("old_file.txt"))
+        45  # File was modified 45 days ago
+    """
+    # .stat() returns file metadata (size, timestamps, permissions, etc.)
+    # .st_mtime = modification time as Unix timestamp (seconds since 1970)
+    mtime = datetime.fromtimestamp(file_path.stat().st_mtime)
+    
+    # Calculate the difference between now and the modification time
+    age = datetime.now() - mtime
+    
+    # .days gives us just the day component of the timedelta
+    return age.days
+
+
+def is_old_file(file_path: Path, days: int = ARCHIVE_AGE_DAYS) -> bool:
+    """
+    Check if a file is older than the specified number of days.
+    
+    Args:
+        file_path: Path to the file
+        days: Age threshold in days (default: ARCHIVE_AGE_DAYS = 30)
+        
+    Returns:
+        True if file is older than the threshold, False otherwise
+    """
+    return get_file_age_days(file_path) > days
 
 
 def get_category(file_path: Path) -> str:
@@ -98,6 +164,96 @@ def get_category(file_path: Path) -> str:
     
     # If we get here, no category matched - use fallback
     return "Other"
+
+
+def archive_old_files(directory: Path, dry_run: bool = False) -> dict:
+    """
+    Move files older than ARCHIVE_AGE_DAYS to an _Archive subfolder.
+    
+    This helps keep your main folder clean by moving files you haven't
+    touched in a while to a separate location. Files are NOT deleted,
+    just moved to _Archive/ where you can review them later.
+    
+    The archive preserves the category structure:
+        _Archive/
+        ├── Images/
+        │   └── old_photo.jpg
+        ├── Documents/
+        │   └── old_report.pdf
+        └── Other/
+            └── random_old_file.xyz
+    
+    Args:
+        directory: Path to the directory to scan for old files
+        dry_run: If True, only preview what would be archived
+        
+    Returns:
+        Dictionary with statistics about the operation
+    """
+    stats = {"archived": 0, "skipped": 0, "errors": 0, "actions": []}
+    
+    if not directory.is_dir():
+        print(f"Error: '{directory}' is not a valid directory")
+        sys.exit(1)
+    
+    # Get all files in the directory (top level only)
+    files = [f for f in directory.iterdir() if f.is_file()]
+    
+    # Filter to only old files
+    old_files = [f for f in files if not f.name.startswith(".") and is_old_file(f)]
+    
+    if not old_files:
+        print(f"No files older than {ARCHIVE_AGE_DAYS} days found.")
+        return stats
+    
+    print(f"\n{'[DRY RUN] ' if dry_run else ''}Archiving {len(old_files)} files older than {ARCHIVE_AGE_DAYS} days\n")
+    print("-" * 60)
+    
+    archive_dir = directory / ARCHIVE_FOLDER
+    
+    for file_path in old_files:
+        # Determine category for subfolder structure in archive
+        category = get_category(file_path)
+        age_days = get_file_age_days(file_path)
+        
+        # Create path: _Archive/Category/filename
+        dest_dir = archive_dir / category
+        destination = dest_dir / file_path.name
+        
+        action = f"{file_path.name} ({age_days} days old) -> {ARCHIVE_FOLDER}/{category}/"
+        stats["actions"].append(action)
+        
+        if dry_run:
+            print(f"  [WOULD ARCHIVE] {action}")
+        else:
+            try:
+                # Create nested directories if they don't exist
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                
+                # Handle duplicates with timestamp
+                if destination.exists():
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    new_name = f"{file_path.stem}_{timestamp}{file_path.suffix}"
+                    destination = dest_dir / new_name
+                
+                # Move (not delete!) the file to archive
+                shutil.move(str(file_path), str(destination))
+                print(f"  [ARCHIVED] {action}")
+                stats["archived"] += 1
+                
+            except Exception as e:
+                print(f"  [ERROR] {file_path.name}: {e}")
+                stats["errors"] += 1
+    
+    print("-" * 60)
+    
+    if dry_run:
+        print(f"\n[DRY RUN] Would archive {len(stats['actions'])} files")
+        print("Run without --dry-run to apply changes.")
+    else:
+        print(f"\nArchive summary: {stats['archived']} archived, {stats['errors']} errors")
+    
+    return stats
 
 
 def organize_files(directory: Path, dry_run: bool = False) -> dict:
@@ -243,7 +399,7 @@ def main():
     # - formatter_class: RawDescriptionHelpFormatter preserves our epilog formatting
     # - epilog: shown at bottom of --help output (our category list)
     parser = argparse.ArgumentParser(
-        description="Organize files into categorized folders",
+        description="Organize files into categorized folders (NEVER deletes files)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Categories:
@@ -256,6 +412,10 @@ Categories:
   Executables - exe, dmg, app, etc.
   Fonts       - ttf, otf, woff, etc.
   Other       - everything else
+
+Safety:
+  This script NEVER deletes files - it only moves them.
+  Use --dry-run to preview changes before applying.
         """
     )
     
@@ -269,6 +429,10 @@ Categories:
     parser.add_argument("--dry-run", "-n", action="store_true", 
                         help="Preview changes without moving files")
     
+    # Add archive flag for moving old files
+    parser.add_argument("--archive", "-a", action="store_true",
+                        help=f"Move files older than {ARCHIVE_AGE_DAYS} days to {ARCHIVE_FOLDER}/")
+    
     # Parse the command-line arguments
     # This reads sys.argv (the command line) and returns a namespace object
     args = parser.parse_args()
@@ -279,8 +443,16 @@ Categories:
     # Example: "~/Downloads" -> "/Users/jelmer/Downloads"
     directory = Path(args.directory).expanduser().resolve()
     
-    # Call our main logic function
+    # Run the requested operations
+    # Note: We organize first, then archive (so newly organized files can be archived too)
     organize_files(directory, dry_run=args.dry_run)
+    
+    # If --archive flag is set, also archive old files
+    if args.archive:
+        print("\n" + "=" * 60)
+        print("ARCHIVING OLD FILES")
+        print("=" * 60)
+        archive_old_files(directory, dry_run=args.dry_run)
 
 
 # =============================================================================
