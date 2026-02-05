@@ -8,6 +8,7 @@ file extension. It's useful for cleaning up messy folders like Downloads.
 SAFETY POLICY:
     This script NEVER deletes files. It only moves them.
     - Files are moved to category subfolders (Images/, Documents/, etc.)
+    - Large files (>1 GB) are moved to _LargeFiles/ for easy review
     - Old files can be moved to an _Archive/ folder
     - If a file already exists at destination, a timestamp is added to the name
     - Use --dry-run to preview changes before applying them
@@ -74,6 +75,17 @@ AUTO_DELETE_EXTENSIONS = {
 
 # How old (in days) before auto-deletable files are removed
 AUTO_DELETE_AGE_DAYS = 1
+
+# =============================================================================
+# LARGE FILE CONFIGURATION
+# =============================================================================
+
+# Files larger than this threshold are moved to a separate folder
+# This helps identify large downloads that may need attention (review/delete)
+LARGE_FILE_THRESHOLD_BYTES = 1 * 1024 * 1024 * 1024  # 1 GB in bytes
+
+# Folder name for large files (prefixed with _ to sort it separately)
+LARGE_FILES_FOLDER = "_LargeFiles"
 
 # =============================================================================
 # CONFIGURATION
@@ -165,6 +177,57 @@ def is_auto_deletable(file_path: Path) -> bool:
     """
     ext = file_path.suffix.lower()
     return ext in AUTO_DELETE_EXTENSIONS and get_file_age_days(file_path) > AUTO_DELETE_AGE_DAYS
+
+
+def get_file_size_bytes(file_path: Path) -> int:
+    """
+    Get the size of a file in bytes.
+    
+    Args:
+        file_path: Path to the file
+        
+    Returns:
+        File size in bytes
+    """
+    return file_path.stat().st_size
+
+
+def format_file_size(size_bytes: int) -> str:
+    """
+    Convert bytes to human-readable format (KB, MB, GB).
+    
+    Args:
+        size_bytes: Size in bytes
+        
+    Returns:
+        Human-readable string like "1.5 GB" or "256 MB"
+        
+    Example:
+        >>> format_file_size(1536000000)
+        '1.43 GB'
+    """
+    size = float(size_bytes)
+    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+        if size < 1024:
+            return f"{size:.2f} {unit}" if unit != 'B' else f"{int(size)} {unit}"
+        size /= 1024
+    return f"{size:.2f} PB"
+
+
+def is_large_file(file_path: Path) -> bool:
+    """
+    Check if a file exceeds the large file threshold (1 GB).
+    
+    Large files are moved to a separate _LargeFiles folder so you can
+    easily review them and decide whether to keep or delete them.
+    
+    Args:
+        file_path: Path to the file
+        
+    Returns:
+        True if file is larger than LARGE_FILE_THRESHOLD_BYTES
+    """
+    return get_file_size_bytes(file_path) > LARGE_FILE_THRESHOLD_BYTES
 
 
 def cleanup_temp_files(directory: Path, dry_run: bool = False) -> dict:
@@ -426,8 +489,17 @@ def organize_files(directory: Path, dry_run: bool = False) -> dict:
             stats["skipped"] += 1
             continue  # Skip to next iteration of the loop
         
-        # Determine where this file should go
-        category = get_category(file_path)
+        # Check if this is a large file (>1 GB)
+        # Large files go to _LargeFiles/ instead of their category folder
+        # This makes it easy to review and clean up big downloads
+        if is_large_file(file_path):
+            category = LARGE_FILES_FOLDER
+            size_str = format_file_size(get_file_size_bytes(file_path))
+            action = f"{file_path.name} ({size_str}) -> {LARGE_FILES_FOLDER}/"
+        else:
+            # Determine where this file should go based on extension
+            category = get_category(file_path)
+            action = f"{file_path.name} -> {category}/"
         
         # Path objects support / operator for joining paths!
         # This is cleaner than os.path.join(directory, category)
@@ -435,7 +507,6 @@ def organize_files(directory: Path, dry_run: bool = False) -> dict:
         destination = category_dir / file_path.name  # e.g., ~/Downloads/Images/photo.jpg
         
         # Build a human-readable description of the action
-        action = f"{file_path.name} -> {category}/"
         stats["actions"].append(action)
         
         if dry_run:
@@ -515,6 +586,10 @@ Categories:
   Executables - exe, dmg, app, etc.
   Fonts       - ttf, otf, woff, etc.
   Other       - everything else
+
+Special folders:
+  _LargeFiles - files larger than 1 GB (for easy review)
+  _Archive    - files older than 30 days (with --archive)
 
 Safety:
   This script NEVER deletes files - it only moves them.
