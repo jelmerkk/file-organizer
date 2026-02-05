@@ -11,6 +11,9 @@ SAFETY POLICY:
     - Old files can be moved to an _Archive/ folder
     - If a file already exists at destination, a timestamp is added to the name
     - Use --dry-run to preview changes before applying them
+    
+    EXCEPTION: .ica files (Citrix session files) are deleted after 1 day.
+    These are temporary files that serve no purpose after the session ends.
 
 Usage:
     python organize.py <directory>           # Organize files in directory
@@ -48,12 +51,29 @@ from datetime import datetime, timedelta  # Date/time handling
 
 # IMPORTANT: This script NEVER deletes files. Only moves.
 # This is an intentional design decision for safety.
+#
+# EXCEPTION: Temporary files listed in AUTO_DELETE_EXTENSIONS are deleted
+# after AUTO_DELETE_AGE_DAYS. These are files that serve no purpose after
+# a short time (e.g., Citrix session files).
 
 # Number of days after which a file is considered "old" and eligible for archiving
 ARCHIVE_AGE_DAYS = 30
 
 # Name of the archive folder (prefixed with _ to sort it separately)
 ARCHIVE_FOLDER = "_Archive"
+
+# =============================================================================
+# AUTO-DELETE CONFIGURATION (Exception to the no-delete rule)
+# =============================================================================
+
+# File extensions that are safe to delete after a certain age
+# These are temporary files that have no value after their initial use
+AUTO_DELETE_EXTENSIONS = {
+    ".ica",  # Citrix ICA session files - temporary, useless after session ends
+}
+
+# How old (in days) before auto-deletable files are removed
+AUTO_DELETE_AGE_DAYS = 1
 
 # =============================================================================
 # CONFIGURATION
@@ -127,6 +147,89 @@ def is_old_file(file_path: Path, days: int = ARCHIVE_AGE_DAYS) -> bool:
         True if file is older than the threshold, False otherwise
     """
     return get_file_age_days(file_path) > days
+
+
+def is_auto_deletable(file_path: Path) -> bool:
+    """
+    Check if a file is eligible for automatic deletion.
+    
+    Only specific file types (defined in AUTO_DELETE_EXTENSIONS) that are
+    older than AUTO_DELETE_AGE_DAYS qualify for deletion. This is a narrow
+    exception to our "never delete" policy for truly temporary files.
+    
+    Args:
+        file_path: Path to the file
+        
+    Returns:
+        True if file should be auto-deleted, False otherwise
+    """
+    ext = file_path.suffix.lower()
+    return ext in AUTO_DELETE_EXTENSIONS and get_file_age_days(file_path) > AUTO_DELETE_AGE_DAYS
+
+
+def cleanup_temp_files(directory: Path, dry_run: bool = False) -> dict:
+    """
+    Delete temporary files that are older than AUTO_DELETE_AGE_DAYS.
+    
+    This is the ONLY function in this script that deletes files.
+    It only affects files with extensions in AUTO_DELETE_EXTENSIONS
+    (currently just .ica Citrix session files).
+    
+    Why delete these?
+        - .ica files are Citrix session launchers
+        - They're downloaded every time you start a Citrix session
+        - They contain session-specific data that's useless after the session
+        - They pile up quickly in Downloads folders
+    
+    Args:
+        directory: Path to scan for deletable files
+        dry_run: If True, only preview what would be deleted
+        
+    Returns:
+        Dictionary with statistics
+    """
+    stats = {"deleted": 0, "errors": 0, "actions": []}
+    
+    if not directory.is_dir():
+        return stats
+    
+    # Find all files eligible for deletion
+    files_to_delete = [
+        f for f in directory.iterdir() 
+        if f.is_file() and is_auto_deletable(f)
+    ]
+    
+    if not files_to_delete:
+        return stats
+    
+    print(f"\n{'[DRY RUN] ' if dry_run else ''}Cleaning up {len(files_to_delete)} temporary files\n")
+    print("-" * 60)
+    
+    for file_path in files_to_delete:
+        age_days = get_file_age_days(file_path)
+        action = f"{file_path.name} ({age_days} days old)"
+        stats["actions"].append(action)
+        
+        if dry_run:
+            print(f"  [WOULD DELETE] {action}")
+        else:
+            try:
+                # This is the ONLY place we delete files!
+                file_path.unlink()
+                print(f"  [DELETED] {action}")
+                stats["deleted"] += 1
+            except Exception as e:
+                print(f"  [ERROR] {file_path.name}: {e}")
+                stats["errors"] += 1
+    
+    print("-" * 60)
+    
+    if dry_run:
+        print(f"\n[DRY RUN] Would delete {len(stats['actions'])} temporary files")
+    else:
+        print(f"\nCleanup summary: {stats['deleted']} deleted, {stats['errors']} errors")
+    
+    return stats
 
 
 def get_category(file_path: Path) -> str:
@@ -399,7 +502,7 @@ def main():
     # - formatter_class: RawDescriptionHelpFormatter preserves our epilog formatting
     # - epilog: shown at bottom of --help output (our category list)
     parser = argparse.ArgumentParser(
-        description="Organize files into categorized folders (NEVER deletes files)",
+        description="Organize files into categorized folders",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Categories:
@@ -415,6 +518,7 @@ Categories:
 
 Safety:
   This script NEVER deletes files - it only moves them.
+  Exception: --cleanup deletes .ica files older than 1 day.
   Use --dry-run to preview changes before applying.
         """
     )
@@ -433,6 +537,10 @@ Safety:
     parser.add_argument("--archive", "-a", action="store_true",
                         help=f"Move files older than {ARCHIVE_AGE_DAYS} days to {ARCHIVE_FOLDER}/")
     
+    # Add cleanup flag for deleting temporary files
+    parser.add_argument("--cleanup", "-c", action="store_true",
+                        help=f"Delete temporary files (.ica) older than {AUTO_DELETE_AGE_DAYS} day(s)")
+    
     # Parse the command-line arguments
     # This reads sys.argv (the command line) and returns a namespace object
     args = parser.parse_args()
@@ -443,11 +551,22 @@ Safety:
     # Example: "~/Downloads" -> "/Users/jelmer/Downloads"
     directory = Path(args.directory).expanduser().resolve()
     
-    # Run the requested operations
-    # Note: We organize first, then archive (so newly organized files can be archived too)
+    # Run the requested operations in logical order:
+    # 1. Cleanup temp files first (so they don't get organized into Other/)
+    # 2. Organize remaining files into categories
+    # 3. Archive old files last
+    
+    # Step 1: Delete temporary files if --cleanup flag is set
+    if args.cleanup:
+        print("=" * 60)
+        print("CLEANING UP TEMPORARY FILES")
+        print("=" * 60)
+        cleanup_temp_files(directory, dry_run=args.dry_run)
+    
+    # Step 2: Organize files into category folders
     organize_files(directory, dry_run=args.dry_run)
     
-    # If --archive flag is set, also archive old files
+    # Step 3: Archive old files if --archive flag is set
     if args.archive:
         print("\n" + "=" * 60)
         print("ARCHIVING OLD FILES")
