@@ -7,6 +7,9 @@ __pycache__/
 .venv/
 venv/
 ENV/
+*.egg-info/
+dist/
+build/
 
 # IDE
 .vscode/
@@ -18,3 +21,8 @@ Thumbs.db
 
 # Test folder (contains dummy files)
 test_folder/
+
+# Pytest
+.pytest_cache/
+.coverage
+htmlcov/

@@ -70,7 +70,12 @@ Inspired by [Sparkle](https://makeitsparkle.co) - features we can implement.
   - Apply organization rules to external storage
 
 ## Technical Improvements
-- [ ] **Unit Tests** - Add test coverage
+- [x] **Unit Tests** - Add test coverage (88 tests, 92% coverage)
+- [x] **Refactored Architecture** - Proper Python package structure
+  - `file_organizer/config.py` - Dataclass configuration (testable, injectable)
+  - `file_organizer/utils.py` - Pure utility functions
+  - `file_organizer/operations.py` - Core file operations
+  - `file_organizer/cli.py` - CLI argument parsing
 - [ ] **Config File** - Move settings to external config (YAML)
 - [ ] **Logging** - Better logging with rotation
 - [ ] **Error Recovery** - Handle edge cases (locked files, permissions)
