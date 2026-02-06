@@ -12,19 +12,16 @@ Inspired by [Sparkle](https://makeitsparkle.co) - features we can implement.
 - [x] Run at login to catch missed runs
 
 ## High Priority - Next Up
-- [ ] **Duplicate Detection** - Find and flag duplicate files (even with different names)
-  - Use file hash (MD5/SHA) to detect true duplicates
-  - Show duplicates and let user decide which to keep
-  - Could save significant disk space
+- [x] **Duplicate Detection** - Find and flag duplicate files (even with different names)
+  - Use file hash (MD5) to detect true duplicates
+  - Oldest file is kept as original, duplicates moved to `_Duplicates/`
+  - Use `--duplicates` or `-d` flag to enable
+  - Shows potential space savings
 
-- [ ] **Recents Folder** - Keep new files in a "Recents" area before organizing
-  - Files stay in Recents for X hours/days before being sorted
+- [x] **Recents Folder** - Keep new files in a "Recents" area before organizing
+  - Files newer than 24 hours stay in `_Recents/`
   - Gives user time to work with recent downloads before they're moved
-
-- [ ] **Undo/History** - Track moves and allow reverting
-  - Log all file moves to a history file
-  - Add `--undo` flag to reverse last operation
-  - Important for user confidence
+  - Use `--recents` or `-r` flag to enable
 
 ## Medium Priority
 - [ ] **Multiple Folder Support** - Organize Desktop and Documents too

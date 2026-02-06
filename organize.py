@@ -41,8 +41,10 @@ Learning Notes:
 import sys          # System-specific functions (like exit codes)
 import shutil       # High-level file operations (move only - we NEVER delete!)
 import argparse     # Command-line argument parsing
+import hashlib      # For computing file hashes (duplicate detection)
 from pathlib import Path      # Object-oriented filesystem paths (modern way)
 from datetime import datetime, timedelta  # Date/time handling
+from collections import defaultdict  # For grouping duplicates by hash
 
 # Note: We don't actually use 'os' - pathlib.Path replaces most of its functionality
 
@@ -86,6 +88,26 @@ LARGE_FILE_THRESHOLD_BYTES = 1 * 1024 * 1024 * 1024  # 1 GB in bytes
 
 # Folder name for large files (prefixed with _ to sort it separately)
 LARGE_FILES_FOLDER = "_LargeFiles"
+
+# =============================================================================
+# RECENTS FOLDER CONFIGURATION
+# =============================================================================
+
+# How long (in hours) files stay in _Recents before being organized
+RECENTS_AGE_HOURS = 24
+
+# Folder name for recent files (prefixed with _ to sort it separately)
+RECENTS_FOLDER = "_Recents"
+
+# =============================================================================
+# DUPLICATE DETECTION CONFIGURATION
+# =============================================================================
+
+# Folder name for duplicate files (prefixed with _ to sort it separately)
+DUPLICATES_FOLDER = "_Duplicates"
+
+# Buffer size for reading files when computing hashes (8KB chunks)
+HASH_BUFFER_SIZE = 8192
 
 # =============================================================================
 # CONFIGURATION
@@ -228,6 +250,218 @@ def is_large_file(file_path: Path) -> bool:
         True if file is larger than LARGE_FILE_THRESHOLD_BYTES
     """
     return get_file_size_bytes(file_path) > LARGE_FILE_THRESHOLD_BYTES
+
+
+def get_file_age_hours(file_path: Path) -> float:
+    """
+    Get the age of a file in hours based on its modification time.
+    
+    Args:
+        file_path: Path to the file
+        
+    Returns:
+        Number of hours since the file was last modified
+    """
+    mtime = datetime.fromtimestamp(file_path.stat().st_mtime)
+    age = datetime.now() - mtime
+    return age.total_seconds() / 3600  # Convert seconds to hours
+
+
+def is_recent_file(file_path: Path, hours: float = RECENTS_AGE_HOURS) -> bool:
+    """
+    Check if a file is newer than the specified number of hours.
+    
+    Recent files are kept in _Recents folder before being organized,
+    giving you time to work with new downloads before they're sorted.
+    
+    Args:
+        file_path: Path to the file
+        hours: Age threshold in hours (default: RECENTS_AGE_HOURS = 24)
+        
+    Returns:
+        True if file is newer than the threshold, False otherwise
+    """
+    return get_file_age_hours(file_path) < hours
+
+
+def compute_file_hash(file_path: Path) -> str:
+    """
+    Compute MD5 hash of a file for duplicate detection.
+    
+    Why MD5?
+        - Fast enough for our use case (comparing downloads)
+        - Good enough for detecting duplicates (not for security)
+        - Produces a 32-character hex string
+    
+    How it works:
+        - Reads the file in chunks to handle large files efficiently
+        - Updates the hash with each chunk
+        - Returns the final hex digest
+    
+    Args:
+        file_path: Path to the file to hash
+        
+    Returns:
+        MD5 hash as a 32-character hex string
+        
+    Example:
+        >>> compute_file_hash(Path("photo.jpg"))
+        'd41d8cd98f00b204e9800998ecf8427e'
+    """
+    hasher = hashlib.md5()
+    
+    with open(file_path, 'rb') as f:
+        # Read file in chunks to avoid loading entire file into memory
+        while chunk := f.read(HASH_BUFFER_SIZE):
+            hasher.update(chunk)
+    
+    return hasher.hexdigest()
+
+
+def find_duplicates(directory: Path, recursive: bool = True) -> dict:
+    """
+    Find duplicate files in a directory by comparing file hashes.
+    
+    How it works:
+        1. Scan all files and compute their hashes
+        2. Group files by hash - files with same hash are duplicates
+        3. Return only groups with more than one file
+    
+    Args:
+        directory: Path to scan for duplicates
+        recursive: If True, scan subdirectories too
+        
+    Returns:
+        Dictionary mapping hash -> list of duplicate file paths
+        Only includes hashes with 2+ files (actual duplicates)
+        
+    Example:
+        >>> find_duplicates(Path("~/Downloads"))
+        {
+            'abc123...': [Path('file1.jpg'), Path('copy_of_file1.jpg')],
+            'def456...': [Path('doc.pdf'), Path('doc(1).pdf'), Path('doc(2).pdf')]
+        }
+    """
+    # Group files by their hash
+    hash_to_files = defaultdict(list)
+    
+    # Choose iteration method based on recursive flag
+    if recursive:
+        files = [f for f in directory.rglob("*") if f.is_file()]
+    else:
+        files = [f for f in directory.iterdir() if f.is_file()]
+    
+    # Skip hidden files and special folders
+    files = [f for f in files if not any(part.startswith(".") or part.startswith("_") 
+                                          for part in f.parts)]
+    
+    print(f"Scanning {len(files)} files for duplicates...")
+    
+    for file_path in files:
+        try:
+            # Skip empty files (they all have the same hash)
+            if file_path.stat().st_size == 0:
+                continue
+                
+            file_hash = compute_file_hash(file_path)
+            hash_to_files[file_hash].append(file_path)
+        except (PermissionError, OSError) as e:
+            print(f"  [WARNING] Could not read {file_path.name}: {e}")
+    
+    # Filter to only include actual duplicates (2+ files with same hash)
+    duplicates = {h: files for h, files in hash_to_files.items() if len(files) > 1}
+    
+    return duplicates
+
+
+def handle_duplicates(directory: Path, dry_run: bool = False) -> dict:
+    """
+    Find and handle duplicate files in a directory.
+    
+    This function finds duplicates and moves all but the oldest (original)
+    to a _Duplicates folder for review. The oldest file is kept in place
+    as it's likely the original.
+    
+    Safety: No files are deleted, only moved to _Duplicates/ for review.
+    
+    Args:
+        directory: Path to scan for duplicates
+        dry_run: If True, only preview what would be done
+        
+    Returns:
+        Dictionary with statistics about the operation
+    """
+    stats = {"duplicates_found": 0, "files_moved": 0, "space_recoverable": 0, "errors": 0}
+    
+    duplicates = find_duplicates(directory)
+    
+    if not duplicates:
+        print("No duplicate files found.")
+        return stats
+    
+    # Calculate total duplicates and potential space savings
+    total_duplicate_sets = len(duplicates)
+    total_duplicate_files = sum(len(files) - 1 for files in duplicates.values())  # -1 for original
+    
+    print(f"\n{'[DRY RUN] ' if dry_run else ''}Found {total_duplicate_sets} sets of duplicates ({total_duplicate_files} extra files)\n")
+    print("-" * 60)
+    
+    duplicates_dir = directory / DUPLICATES_FOLDER
+    
+    for file_hash, file_list in duplicates.items():
+        # Sort by modification time - oldest first (likely the original)
+        file_list.sort(key=lambda f: f.stat().st_mtime)
+        
+        original = file_list[0]
+        duplicates_to_move = file_list[1:]
+        
+        print(f"\n  Original: {original.relative_to(directory)}")
+        
+        for dup in duplicates_to_move:
+            size = get_file_size_bytes(dup)
+            size_str = format_file_size(size)
+            stats["duplicates_found"] += 1
+            stats["space_recoverable"] += size
+            
+            if dry_run:
+                print(f"    [WOULD MOVE] {dup.relative_to(directory)} ({size_str})")
+            else:
+                try:
+                    # Create duplicates directory if needed
+                    duplicates_dir.mkdir(exist_ok=True)
+                    
+                    # Preserve relative path structure in duplicates folder
+                    relative_path = dup.relative_to(directory)
+                    dest = duplicates_dir / relative_path
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    
+                    # Handle name collision
+                    if dest.exists():
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        new_name = f"{dup.stem}_{timestamp}{dup.suffix}"
+                        dest = dest.parent / new_name
+                    
+                    shutil.move(str(dup), str(dest))
+                    print(f"    [MOVED] {dup.relative_to(directory)} ({size_str})")
+                    stats["files_moved"] += 1
+                    
+                except Exception as e:
+                    print(f"    [ERROR] {dup.name}: {e}")
+                    stats["errors"] += 1
+    
+    print("\n" + "-" * 60)
+    
+    space_str = format_file_size(stats["space_recoverable"])
+    if dry_run:
+        print(f"\n[DRY RUN] Would move {stats['duplicates_found']} duplicate files")
+        print(f"Potential space savings: {space_str}")
+        print(f"Duplicates would be moved to: {DUPLICATES_FOLDER}/")
+        print("Run without --dry-run to apply changes.")
+    else:
+        print(f"\nDuplicate summary: {stats['files_moved']} moved to {DUPLICATES_FOLDER}/")
+        print(f"Space recoverable (if you delete duplicates): {space_str}")
+    
+    return stats
 
 
 def cleanup_temp_files(directory: Path, dry_run: bool = False) -> dict:
@@ -422,7 +656,7 @@ def archive_old_files(directory: Path, dry_run: bool = False) -> dict:
     return stats
 
 
-def organize_files(directory: Path, dry_run: bool = False) -> dict:
+def organize_files(directory: Path, dry_run: bool = False, use_recents: bool = False) -> dict:
     """
     Organize files in the given directory into categorized subfolders.
     
@@ -436,6 +670,8 @@ def organize_files(directory: Path, dry_run: bool = False) -> dict:
         directory: Path to the directory to organize
         dry_run: If True, only preview changes without moving files
                  (This is a safety feature - always preview first!)
+        use_recents: If True, keep files newer than RECENTS_AGE_HOURS in _Recents/
+                     This gives you time to work with new downloads before sorting
         
     Returns:
         Dictionary with statistics about the operation:
@@ -489,10 +725,16 @@ def organize_files(directory: Path, dry_run: bool = False) -> dict:
             stats["skipped"] += 1
             continue  # Skip to next iteration of the loop
         
+        # Check if this is a recent file and --recents is enabled
+        # Recent files go to _Recents/ to give you time to work with them
+        if use_recents and is_recent_file(file_path):
+            age_hours = get_file_age_hours(file_path)
+            category = RECENTS_FOLDER
+            action = f"{file_path.name} ({age_hours:.1f}h old) -> {RECENTS_FOLDER}/"
         # Check if this is a large file (>1 GB)
         # Large files go to _LargeFiles/ instead of their category folder
         # This makes it easy to review and clean up big downloads
-        if is_large_file(file_path):
+        elif is_large_file(file_path):
             category = LARGE_FILES_FOLDER
             size_str = format_file_size(get_file_size_bytes(file_path))
             action = f"{file_path.name} ({size_str}) -> {LARGE_FILES_FOLDER}/"
@@ -588,8 +830,10 @@ Categories:
   Other       - everything else
 
 Special folders:
-  _LargeFiles - files larger than 1 GB (for easy review)
-  _Archive    - files older than 30 days (with --archive)
+  _LargeFiles  - files larger than 1 GB (for easy review)
+  _Archive     - files older than 30 days (with --archive)
+  _Recents     - files newer than 24 hours (with --recents)
+  _Duplicates  - duplicate files found (with --duplicates)
 
 Safety:
   This script NEVER deletes files - it only moves them.
@@ -616,6 +860,14 @@ Safety:
     parser.add_argument("--cleanup", "-c", action="store_true",
                         help=f"Delete temporary files (.ica) older than {AUTO_DELETE_AGE_DAYS} day(s)")
     
+    # Add duplicates flag for finding and handling duplicate files
+    parser.add_argument("--duplicates", "-d", action="store_true",
+                        help="Find duplicate files and move extras to _Duplicates/")
+    
+    # Add recents flag to keep new files in a separate folder
+    parser.add_argument("--recents", "-r", action="store_true",
+                        help=f"Keep files newer than {RECENTS_AGE_HOURS} hours in _Recents/")
+    
     # Parse the command-line arguments
     # This reads sys.argv (the command line) and returns a namespace object
     args = parser.parse_args()
@@ -628,8 +880,9 @@ Safety:
     
     # Run the requested operations in logical order:
     # 1. Cleanup temp files first (so they don't get organized into Other/)
-    # 2. Organize remaining files into categories
-    # 3. Archive old files last
+    # 2. Find and handle duplicates (before organizing moves files around)
+    # 3. Organize remaining files into categories (respecting --recents)
+    # 4. Archive old files last
     
     # Step 1: Delete temporary files if --cleanup flag is set
     if args.cleanup:
@@ -638,10 +891,17 @@ Safety:
         print("=" * 60)
         cleanup_temp_files(directory, dry_run=args.dry_run)
     
-    # Step 2: Organize files into category folders
-    organize_files(directory, dry_run=args.dry_run)
+    # Step 2: Find and handle duplicates if --duplicates flag is set
+    if args.duplicates:
+        print("\n" + "=" * 60)
+        print("FINDING DUPLICATE FILES")
+        print("=" * 60)
+        handle_duplicates(directory, dry_run=args.dry_run)
     
-    # Step 3: Archive old files if --archive flag is set
+    # Step 3: Organize files into category folders
+    organize_files(directory, dry_run=args.dry_run, use_recents=args.recents)
+    
+    # Step 4: Archive old files if --archive flag is set
     if args.archive:
         print("\n" + "=" * 60)
         print("ARCHIVING OLD FILES")
