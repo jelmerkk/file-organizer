@@ -18,6 +18,7 @@ from .utils import (
     format_file_size,
     generate_unique_filename,
     get_category,
+    get_file_age_days,
     should_skip_for_duplicates,
 )
 
@@ -215,13 +216,12 @@ def archive_old_files(
     files = [f for f in directory.iterdir() if f.is_file()]
     
     # Filter to only old, non-hidden files and cache age for later output.
-    now_ts = datetime.now().timestamp()
     old_files = []
     for f in files:
         if config.is_hidden(f.name):
             continue
         try:
-            age_days = int((now_ts - f.stat().st_mtime) // 86400)
+            age_days = get_file_age_days(f)
         except (PermissionError, OSError) as e:
             output(f"  [WARNING] Could not inspect {f.name}: {e}")
             continue
@@ -300,7 +300,6 @@ def cleanup_temp_files(
         return result
     
     # Find all files eligible for deletion and cache age for output.
-    now_ts = datetime.now().timestamp()
     files_to_delete = []
     for f in directory.iterdir():
         if not f.is_file():
@@ -308,7 +307,7 @@ def cleanup_temp_files(
         if f.suffix.lower() not in config.auto_delete_extensions:
             continue
         try:
-            age_days = int((now_ts - f.stat().st_mtime) // 86400)
+            age_days = get_file_age_days(f)
         except (PermissionError, OSError) as e:
             output(f"  [WARNING] Could not inspect {f.name}: {e}")
             continue
@@ -439,7 +438,9 @@ def handle_duplicates(
     output("-" * 60)
     
     duplicates_dir = directory / config.duplicates_folder
-    
+    if not dry_run:
+        duplicates_dir.mkdir(exist_ok=True)
+
     for file_hash, file_list in duplicates.items():
         file_stats = {}
         for file_path in file_list:
@@ -472,8 +473,6 @@ def handle_duplicates(
                 output(f"    [WOULD MOVE] {action}")
             else:
                 try:
-                    duplicates_dir.mkdir(exist_ok=True)
-                    
                     # Preserve relative path structure
                     relative_path = dup.relative_to(directory)
                     dest = duplicates_dir / relative_path

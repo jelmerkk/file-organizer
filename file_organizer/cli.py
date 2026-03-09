@@ -18,6 +18,12 @@ from .operations import (
 )
 
 
+def _print_section(title: str) -> None:
+    print("\n" + "=" * 60)
+    print(title)
+    print("=" * 60)
+
+
 def create_parser(config: Config = DEFAULT_CONFIG) -> argparse.ArgumentParser:
     """
     Create the argument parser for the CLI.
@@ -123,28 +129,22 @@ def run(
         # 4. Archive old files last
         
         if args.cleanup:
-            print("=" * 60)
-            print("CLEANING UP TEMPORARY FILES")
-            print("=" * 60)
+            _print_section("CLEANING UP TEMPORARY FILES")
             cleanup_temp_files(directory, dry_run=args.dry_run, config=config)
-        
+
         if args.duplicates:
-            print("\n" + "=" * 60)
-            print("FINDING DUPLICATE FILES")
-            print("=" * 60)
+            _print_section("FINDING DUPLICATE FILES")
             handle_duplicates(directory, dry_run=args.dry_run, config=config)
-        
+
         organize_files(
             directory,
             dry_run=args.dry_run,
             use_recents=args.recents,
             config=config
         )
-        
+
         if args.archive:
-            print("\n" + "=" * 60)
-            print("ARCHIVING OLD FILES")
-            print("=" * 60)
+            _print_section("ARCHIVING OLD FILES")
             archive_old_files(directory, dry_run=args.dry_run, config=config)
         
         return 0
