@@ -7,6 +7,7 @@ archive old files, and more.
 
 from .config import Config
 from .operations import (
+    OperationResult,
     organize_files,
     archive_old_files,
     cleanup_temp_files,
@@ -17,8 +18,9 @@ from .operations import (
 __version__ = "1.0.0"
 __all__ = [
     "Config",
+    "OperationResult",
     "organize_files",
-    "archive_old_files", 
+    "archive_old_files",
     "cleanup_temp_files",
     "find_duplicates",
     "handle_duplicates",

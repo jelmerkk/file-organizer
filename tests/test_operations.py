@@ -13,6 +13,7 @@ from file_organizer.config import Config
 from file_organizer.operations import (
     OperationResult,
     archive_old_files,
+    cleanup_empty_folders,
     cleanup_temp_files,
     find_duplicates,
     handle_duplicates,
@@ -315,6 +316,62 @@ class TestHandleDuplicates:
         
         assert result.success_count == 0
         assert any("No duplicate files found" in msg for msg in capture_output)
+
+
+class TestCleanupEmptyFolders:
+    """Tests for cleanup_empty_folders function."""
+    
+    def test_removes_empty_category_folder(self, temp_dir: Path, capture_output: list, output_callback):
+        """Test that empty category folders are removed."""
+        empty_images = temp_dir / "Images"
+        empty_images.mkdir()
+        
+        removed = cleanup_empty_folders(temp_dir, output=output_callback)
+        
+        assert removed == 1
+        assert not empty_images.exists()
+    
+    def test_keeps_non_empty_folders(self, temp_dir: Path, capture_output: list, output_callback):
+        """Test that folders with files are kept."""
+        images = temp_dir / "Images"
+        images.mkdir()
+        (images / "photo.jpg").write_text("content")
+        
+        removed = cleanup_empty_folders(temp_dir, output=output_callback)
+        
+        assert removed == 0
+        assert images.exists()
+    
+    def test_ignores_user_folders(self, temp_dir: Path, capture_output: list, output_callback):
+        """Test that non-category folders are not removed."""
+        user_folder = temp_dir / "MyStuff"
+        user_folder.mkdir()
+        
+        removed = cleanup_empty_folders(temp_dir, output=output_callback)
+        
+        assert removed == 0
+        assert user_folder.exists()
+    
+    def test_removes_empty_special_folders(self, temp_dir: Path, test_config: Config, capture_output: list, output_callback):
+        """Test that empty special folders are removed."""
+        archive = temp_dir / test_config.archive_folder
+        archive.mkdir()
+        
+        removed = cleanup_empty_folders(temp_dir, config=test_config, output=output_callback)
+        
+        assert removed == 1
+        assert not archive.exists()
+    
+    def test_dry_run_does_not_remove(self, temp_dir: Path, capture_output: list, output_callback):
+        """Test that dry run only previews removal."""
+        empty_images = temp_dir / "Images"
+        empty_images.mkdir()
+        
+        removed = cleanup_empty_folders(temp_dir, dry_run=True, output=output_callback)
+        
+        assert removed == 0
+        assert empty_images.exists()
+        assert any("[WOULD REMOVE]" in msg for msg in capture_output)
 
 
 class TestOperationResult:
